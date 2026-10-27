@@ -52,7 +52,7 @@ def home():
     return "¡El bot de Telegram con Gemini está activo y funcionando!"
 
 # Ruta del Webhook (Telegram enviará los mensajes aquí de forma automática)
-@app.route(f"/{TELEGRAM_TOKEN}", methods=["POST"])
+@app.route(f"/{8925150491:AAFN98hJLK5bNoTmeTmVomCdDmcA9Bmn-mA}", methods=["POST"])
 def webhook():
     json_data = request.get_json(force=True)
     update = Update.de_json(json_data, telegram_app.bot)
