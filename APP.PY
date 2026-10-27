@@ -54,16 +54,29 @@ def home():
 # Ruta del Webhook (Telegram enviará los mensajes aquí de forma automática)
 @app.route("/8925150491:AAFN98hJLK5bNoTmeTmVomCdDmcA9Bmn-mA", methods=["POST"])
 def webhook():
-    json_data = request.get_json(force=True)
-    update = Update.de_json(json_data, telegram_app.bot)
-    
-    # Ejecutar la actualización de forma asíncrona en Flask
-    async def process():
-        await telegram_app.initialize()
-        await telegram_app.process_update(update)
+    try:
+        # 1. Recibir los datos de Telegram
+        json_data = request.get_json(force=True)
+        update = Update.de_json(json_data, application.bot)
 
-    asyncio.run(process())
-    return "ok"
+        # 2. Función interna para procesar con Telegram y Gemini
+        async def process():
+            await application.initialize()
+            await application.process_update(update)
+
+        # 3. Ejecutar el bucle de forma segura sin que se cierre bruscamente
+        try:
+            asyncio.run(process())
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            loop.run_until_complete(process())
+
+        return "OK", 200
+
+    except Exception as e:
+        print(f"ERROR REAL: {str(e)}")
+        return "OK", 200
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
