@@ -39,7 +39,7 @@ async def responder(update: Update, context):
         
         await update.message.reply_text(respuesta.text, parse_mode="Markdown")
     except Exception as e:
-        print(f"Error generando respuesta: {e}")
+       print(f"ERROR REAL DE GEMINI: {str(e)}")
         await update.message.reply_text("Tuve un pequeño problema procesando tu mensaje.")
 
 # Registrar manejadores en el bot
