@@ -9,7 +9,7 @@ from telegram import Update
 from telegram.error import BadRequest
 from telegram.ext import Application, CommandHandler, MessageHandler, filters
 from google import genai
-from google.genai import types
+from google.genai import types, errors
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("bot")
@@ -17,7 +17,16 @@ log = logging.getLogger("bot")
 # --- Credenciales (variables de entorno en Render) ---
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
-MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.8-flash")
+# Modelos en orden de preferencia: si uno falla por cuota, se prueba el siguiente.
+# Puedes cambiarlos con la variable GEMINI_MODELS (separados por comas).
+MODELOS = [
+    m.strip()
+    for m in os.environ.get(
+        "GEMINI_MODELS",
+        "gemini-3.8-flash,gemini-3.7-flash,gemini-3.5-flash-lite,gemini-2.5-flash",
+    ).split(",")
+    if m.strip()
+]
 # Render define esta variable automáticamente (https://tu-servicio.onrender.com)
 BASE_URL = os.environ.get("RENDER_EXTERNAL_URL")
 
@@ -91,6 +100,33 @@ threading.Thread(target=loop.run_forever, daemon=True).start()
 telegram_app = Application.builder().token(TELEGRAM_TOKEN).build()
 
 
+class CuotaAgotada(Exception):
+    """Ningún modelo de la lista pudo responder."""
+
+
+async def generar(contenido):
+    """Prueba cada modelo en orden. Salta al siguiente si hay cuota agotada (429),
+    modelo inexistente (404) o servidor sobrecargado (500/503)."""
+    ultimo_error = None
+    for modelo in MODELOS:
+        try:
+            respuesta = await gemini_client.aio.models.generate_content(
+                model=modelo,
+                contents=contenido,
+                config=types.GenerateContentConfig(system_instruction=PROMPT_SISTEMA),
+            )
+            if modelo != MODELOS[0]:
+                log.info("Respondió el modelo de respaldo: %s", modelo)
+            return respuesta
+        except (errors.ClientError, errors.ServerError) as e:
+            if e.code in (429, 404, 500, 503):
+                log.warning("Modelo %s no disponible (%s); probando el siguiente", modelo, e.code)
+                ultimo_error = e
+                continue
+            raise  # 400/403 (API key inválida, etc.) no se arreglan cambiando de modelo
+    raise CuotaAgotada() from ultimo_error
+
+
 async def start(update: Update, context):
     await update.message.reply_text(
         "¡Hola! Soy tu agente inteligente operando 24/7 en la nube 🚀\n"
@@ -112,15 +148,17 @@ async def responder(update: Update, context):
         contenido = cargar_historial(chat_id) + [
             types.Content(role="user", parts=[types.Part(text=texto_usuario)])
         ]
-        respuesta = await gemini_client.aio.models.generate_content(
-            model=MODEL,
-            contents=contenido,
-            config=types.GenerateContentConfig(system_instruction=PROMPT_SISTEMA),
-        )
+        respuesta = await generar(contenido)
         texto = respuesta.text or "No pude generar una respuesta."
         # Solo se guarda si Gemini respondió bien, así el historial no queda cojo
         if respuesta.text:
             guardar_turno(chat_id, texto_usuario, texto)
+    except CuotaAgotada:
+        log.error("Todos los modelos agotaron su cuota o no están disponibles")
+        await update.message.reply_text(
+            "Se agotó la cuota diaria de todos mis modelos. Prueba de nuevo más tarde 🙏"
+        )
+        return
     except Exception:
         log.exception("ERROR REAL DE GEMINI")
         await update.message.reply_text("Tuve un pequeño problema procesando tu mensaje.")
