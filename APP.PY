@@ -51,18 +51,19 @@ telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, respond
 def home():
     return "¡El bot de Telegram con Gemini está activo y funcionando!"
 
-# Ruta del Webhook (Telegram enviará los mensajes aquí de forma automática)
-@app.route("/8925150491:AAFN98hJLK5bNoTmeTmVomCdDmcA9Bmn-mA", methods=["POST"])
+# Ruta del Webhook (Usa TELEGRAM_TOKEN dinámicamente)
+@app.route(f"/{TELEGRAM_TOKEN}", methods=["POST"])
 def webhook():
     try:
         # 1. Recibir los datos de Telegram
         json_data = request.get_json(force=True)
-        update = Update.de_json(json_data, application.bot)
+        # Corregido: Usamos telegram_app en lugar de application
+        update = Update.de_json(json_data, telegram_app.bot)
 
         # 2. Función interna para procesar con Telegram y Gemini
         async def process():
-            await application.initialize()
-            await application.process_update(update)
+            await telegram_app.initialize()
+            await telegram_app.process_update(update)
 
         # 3. Ejecutar el bucle de forma segura sin que se cierre bruscamente
         try:
