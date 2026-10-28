@@ -1,83 +1,170 @@
 import os
+import sqlite3
 import asyncio
+import logging
+import threading
+
 from flask import Flask, request
 from telegram import Update
+from telegram.error import BadRequest
 from telegram.ext import Application, CommandHandler, MessageHandler, filters
 from google import genai
+from google.genai import types
 
-# Cargar credenciales de forma segura desde el entorno de la nube
+logging.basicConfig(level=logging.INFO)
+log = logging.getLogger("bot")
+
+# --- Credenciales (variables de entorno en Render) ---
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.8-flash")
+# Render define esta variable automáticamente (https://tu-servicio.onrender.com)
+BASE_URL = os.environ.get("RENDER_EXTERNAL_URL")
+
+# --- Memoria ---
+DB_PATH = os.environ.get("DB_PATH", "memoria.db")
+# Cantidad de mensajes recordados por chat (usa un número par: pregunta + respuesta)
+MAX_MENSAJES = int(os.environ.get("MAX_MENSAJES", "30"))
 
 if not TELEGRAM_TOKEN or not GEMINI_API_KEY:
     raise ValueError("Faltan las variables de entorno TELEGRAM_TOKEN o GEMINI_API_KEY.")
 
-# Inicializar los clientes
+PROMPT_SISTEMA = (
+    "Eres un asistente personal eficiente, directo, amigable y brillante "
+    "resolviendo dudas y organizando tareas. Recuerdas lo conversado antes "
+    "con la persona y lo usas cuando es relevante."
+)
+
 gemini_client = genai.Client(api_key=GEMINI_API_KEY)
 app = Flask(__name__)
 
-# Configurar la aplicación del bot de Telegram
+# --- Base de datos de historial ---
+db = sqlite3.connect(DB_PATH, check_same_thread=False)
+db.execute(
+    """CREATE TABLE IF NOT EXISTS historial (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        chat_id INTEGER NOT NULL,
+        rol TEXT NOT NULL,
+        texto TEXT NOT NULL
+    )"""
+)
+db.execute("CREATE INDEX IF NOT EXISTS idx_chat ON historial(chat_id, id)")
+db.commit()
+
+
+def cargar_historial(chat_id):
+    """Devuelve los últimos MAX_MENSAJES mensajes del chat, en orden cronológico."""
+    filas = db.execute(
+        """SELECT rol, texto FROM (
+               SELECT id, rol, texto FROM historial
+               WHERE chat_id = ? ORDER BY id DESC LIMIT ?
+           ) ORDER BY id ASC""",
+        (chat_id, MAX_MENSAJES),
+    ).fetchall()
+    return [types.Content(role=rol, parts=[types.Part(text=texto)]) for rol, texto in filas]
+
+
+def guardar_turno(chat_id, pregunta, respuesta):
+    """Guarda pregunta y respuesta juntas y recorta lo más antiguo."""
+    db.executemany(
+        "INSERT INTO historial (chat_id, rol, texto) VALUES (?, ?, ?)",
+        [(chat_id, "user", pregunta), (chat_id, "model", respuesta)],
+    )
+    db.execute(
+        """DELETE FROM historial WHERE chat_id = ? AND id NOT IN (
+               SELECT id FROM historial WHERE chat_id = ? ORDER BY id DESC LIMIT ?
+           )""",
+        (chat_id, chat_id, MAX_MENSAJES),
+    )
+    db.commit()
+
+
+def borrar_historial(chat_id):
+    db.execute("DELETE FROM historial WHERE chat_id = ?", (chat_id,))
+    db.commit()
+
+
+# --- Un único event loop persistente en un hilo aparte ---
+loop = asyncio.new_event_loop()
+threading.Thread(target=loop.run_forever, daemon=True).start()
+
 telegram_app = Application.builder().token(TELEGRAM_TOKEN).build()
 
-# Comando /start
+
 async def start(update: Update, context):
-    await update.message.reply_text("¡Hola! Soy tu agente inteligente operando 24/7 en la nube 🚀")
+    await update.message.reply_text(
+        "¡Hola! Soy tu agente inteligente operando 24/7 en la nube 🚀\n"
+        "Recuerdo nuestra conversación. Usa /reset si quieres que la olvide."
+    )
 
-# Manejador de mensajes de texto
+
+async def reset(update: Update, context):
+    borrar_historial(update.effective_chat.id)
+    await update.message.reply_text("Listo, borré la memoria de esta conversación 🧹")
+
+
 async def responder(update: Update, context):
+    chat_id = update.effective_chat.id
     texto_usuario = update.message.text
-    try:
-        prompt_sistema = (
-            "Eres un asistente personal eficiente, directo, amigable y brillante "
-            "resolviendo dudas y organizando tareas."
-        )
-        
-        respuesta = gemini_client.models.generate_content(
-            model="gemini-3.8-flash",
-            contents=f"{prompt_sistema}\n\nMensaje del usuario: {texto_usuario}"
-        )
-        
-        await update.message.reply_text(respuesta.text, parse_mode="Markdown")
-    except Exception as e:
-        print(f"ERROR REAL DE GEMINI: {str(e)}")
-        await update.message.reply_text("Tuve un pequeño problema procesando tu mensaje.")
+    await context.bot.send_chat_action(chat_id, "typing")
 
-# Registrar manejadores en el bot
+    try:
+        contenido = cargar_historial(chat_id) + [
+            types.Content(role="user", parts=[types.Part(text=texto_usuario)])
+        ]
+        respuesta = await gemini_client.aio.models.generate_content(
+            model=MODEL,
+            contents=contenido,
+            config=types.GenerateContentConfig(system_instruction=PROMPT_SISTEMA),
+        )
+        texto = respuesta.text or "No pude generar una respuesta."
+        # Solo se guarda si Gemini respondió bien, así el historial no queda cojo
+        if respuesta.text:
+            guardar_turno(chat_id, texto_usuario, texto)
+    except Exception:
+        log.exception("ERROR REAL DE GEMINI")
+        await update.message.reply_text("Tuve un pequeño problema procesando tu mensaje.")
+        return
+
+    # Telegram permite máx. 4096 caracteres por mensaje
+    for i in range(0, len(texto), 4000):
+        trozo = texto[i : i + 4000]
+        try:
+            await update.message.reply_text(trozo, parse_mode="Markdown")
+        except BadRequest:
+            # Markdown inválido: enviar como texto plano
+            await update.message.reply_text(trozo)
+
+
 telegram_app.add_handler(CommandHandler("start", start))
+telegram_app.add_handler(CommandHandler("reset", reset))
 telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, responder))
 
-# Ruta base para verificar que el servidor web está vivo
+
+async def _iniciar():
+    await telegram_app.initialize()
+    if BASE_URL:
+        await telegram_app.bot.set_webhook(f"{BASE_URL}/{TELEGRAM_TOKEN}")
+        log.info("Webhook configurado en %s", BASE_URL)
+
+
+asyncio.run_coroutine_threadsafe(_iniciar(), loop).result()
+
+
 @app.route("/")
 def home():
     return "¡El bot de Telegram con Gemini está activo y funcionando!"
 
-# Ruta del Webhook (Usa TELEGRAM_TOKEN dinámicamente)
+
 @app.route(f"/{TELEGRAM_TOKEN}", methods=["POST"])
 def webhook():
     try:
-        # 1. Recibir los datos de Telegram
-        json_data = request.get_json(force=True)
-        # Corregido: Usamos telegram_app en lugar de application
-        update = Update.de_json(json_data, telegram_app.bot)
+        update = Update.de_json(request.get_json(force=True), telegram_app.bot)
+        asyncio.run_coroutine_threadsafe(telegram_app.process_update(update), loop)
+    except Exception:
+        log.exception("ERROR en webhook")
+    return "OK", 200
 
-        # 2. Función interna para procesar con Telegram y Gemini
-        async def process():
-            await telegram_app.initialize()
-            await telegram_app.process_update(update)
-
-        # 3. Ejecutar el bucle de forma segura sin que se cierre bruscamente
-        try:
-            asyncio.run(process())
-        except RuntimeError:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            loop.run_until_complete(process())
-
-        return "OK", 200
-
-    except Exception as e:
-        print(f"ERROR REAL: {str(e)}")
-        return "OK", 200
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
