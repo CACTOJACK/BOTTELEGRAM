@@ -219,9 +219,28 @@ INSTRUCCIONES_WORKSPACE = (
 )
 
 
-def armar_prompt():
+DIAS = ["lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo"]
+MESES = [
+    "enero", "febrero", "marzo", "abril", "mayo", "junio",
+    "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre",
+]
+
+
+def fecha_actual_texto():
+    """Fecha y hora real de Chile, en español (el servidor de Render trabaja en UTC)."""
     ahora = datetime.now(TZ)
-    prompt = PROMPT_SISTEMA + f"\nFecha y hora actual en Chile: {ahora:%A %d-%m-%Y %H:%M}."
+    return (
+        f"{DIAS[ahora.weekday()]} {ahora.day} de {MESES[ahora.month - 1]} de {ahora.year}, "
+        f"{ahora:%H:%M} (hora de Chile)"
+    )
+
+
+def armar_prompt():
+    prompt = (
+        f"FECHA Y HORA ACTUAL: {fecha_actual_texto()}. Esta es la fecha real de hoy: úsala "
+        "siempre y descarta cualquier otra fecha o año que creas conocer o que aparezca en "
+        "mensajes anteriores de la conversación.\n\n" + PROMPT_SISTEMA
+    )
     prompt += INSTRUCCIONES_RECORDATORIOS
     if HERRAMIENTAS:
         prompt += INSTRUCCIONES_WORKSPACE
@@ -315,7 +334,10 @@ async def atender(update: Update, context, partes, texto_historial):
     await context.bot.send_chat_action(chat_id, "typing")
 
     try:
-        contenido = cargar_historial(chat_id) + [types.Content(role="user", parts=partes)]
+        # La fecha va también en el mensaje actual (sin guardarla en el historial): el modelo
+        # le da más peso que al prompt de sistema y no arrastra fechas viejas de la memoria.
+        sello = types.Part(text=f"[Fecha y hora actual: {fecha_actual_texto()}]")
+        contenido = cargar_historial(chat_id) + [types.Content(role="user", parts=[sello] + partes)]
         respuesta = await generar(contenido)
         texto = respuesta.text or "No pude generar una respuesta."
         # Solo se guarda si Gemini respondió bien, así el historial no queda cojo
