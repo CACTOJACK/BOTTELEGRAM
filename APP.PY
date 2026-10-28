@@ -15,7 +15,7 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters
 from google import genai
 from google.genai import types, errors
 
-from workspace import HERRAMIENTAS  # lista vacía si no hay credenciales de Google
+from WORKSPACE import HERRAMIENTAS  # lista vacía si no hay credenciales de Google
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("bot")
