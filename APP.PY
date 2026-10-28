@@ -20,6 +20,9 @@ from workspace import HERRAMIENTAS  # lista vacía si no hay credenciales de Goo
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("bot")
 
+# Sirve para comprobar qué versión está desplegada en Render (se ve con /fecha y en los logs)
+VERSION = "2026-10-27-fecha"
+
 # --- Credenciales (variables de entorno en Render) ---
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
@@ -173,7 +176,18 @@ async def cancelar_recordatorio(recordatorio_id: int) -> dict:
     return {"ok": cur.rowcount > 0}
 
 
-HERRAMIENTAS_BOT = HERRAMIENTAS + [crear_recordatorio, listar_recordatorios, cancelar_recordatorio]
+async def fecha_hora_actual() -> dict:
+    """Devuelve la fecha y hora reales de hoy en Chile. Úsala siempre que te pregunten qué
+    día, fecha, año u hora es, o cuando necesites calcular fechas relativas."""
+    return {"fecha_hora": fecha_actual_texto(), "iso": _ahora_chile().isoformat(timespec="minutes")}
+
+
+HERRAMIENTAS_BOT = HERRAMIENTAS + [
+    fecha_hora_actual,
+    crear_recordatorio,
+    listar_recordatorios,
+    cancelar_recordatorio,
+]
 
 
 async def procesar_recordatorios():
@@ -239,7 +253,8 @@ def armar_prompt():
     prompt = (
         f"FECHA Y HORA ACTUAL: {fecha_actual_texto()}. Esta es la fecha real de hoy: úsala "
         "siempre y descarta cualquier otra fecha o año que creas conocer o que aparezca en "
-        "mensajes anteriores de la conversación.\n\n" + PROMPT_SISTEMA
+        "mensajes anteriores de la conversación. Si te preguntan qué día, fecha, año u hora "
+        "es, responde con esa fecha o llama a fecha_hora_actual.\n\n" + PROMPT_SISTEMA
     )
     prompt += INSTRUCCIONES_RECORDATORIOS
     if HERRAMIENTAS:
@@ -291,6 +306,11 @@ async def start(update: Update, context):
         "¡Hola! Soy tu agente inteligente operando 24/7 en la nube 🚀\n"
         "Recuerdo nuestra conversación. Usa /reset si quieres que la olvide."
     )
+
+
+async def comando_fecha(update: Update, context):
+    """Responde sin usar Gemini: sirve para comprobar el deploy y la hora del servidor."""
+    await update.message.reply_text(f"Versión: {VERSION}\n{fecha_actual_texto()}")
 
 
 async def reset(update: Update, context):
@@ -366,11 +386,13 @@ async def atender(update: Update, context, partes, texto_historial):
 
 telegram_app.add_handler(CommandHandler("start", start))
 telegram_app.add_handler(CommandHandler("reset", reset))
+telegram_app.add_handler(CommandHandler("fecha", comando_fecha))
 telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, responder))
 telegram_app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, responder_audio))
 
 
 async def _iniciar():
+    log.info("Iniciando bot, versión %s", VERSION)
     await telegram_app.initialize()
     if BASE_URL:
         await telegram_app.bot.set_webhook(f"{BASE_URL}/{TELEGRAM_TOKEN}")
